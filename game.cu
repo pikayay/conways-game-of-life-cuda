@@ -48,7 +48,7 @@ void cpuVersion(int width, int height, int size, int runtime, uint8_t *input, ui
                 neighborAddresses[7] = -1;
             }
             // is the cell on the bottom edge?
-            if ((j+1) % width == 0) {
+            if (j > size - width) {
                 neighborAddresses[5] = -1;
                 neighborAddresses[6] = -1;
                 neighborAddresses[7] = -1;
@@ -77,6 +77,63 @@ void cpuVersion(int width, int height, int size, int runtime, uint8_t *input, ui
 }
 
 
+__global__ void gpuGlobal(int width, int height, int size, int runtime, uint8_t *input, uint8_t *output) {
+    // get the col and row for the thread
+    int Col = blockIdx.x * blockDim.x + threadIdx.x;
+    int Row = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // bounds check
+    if (Col < width && Row < height) {
+        int j = Col + Row * width;
+        uint8_t cell = input[j];
+        int neighborAddresses[8] = {j-width-1, j-width, j-width+1, j-1, j+1, j+width-1, j+width, j+width+1};
+        int neighbors = 0;
+
+        // for that cell's neighbors:
+        // is the cell on the left edge?
+        if (j % width == 0) {
+            neighborAddresses[0] = -1;
+            neighborAddresses[3] = -1;
+            neighborAddresses[5] = -1;
+        }
+        // is the cell on the top edge?
+        if (j < width) {
+            neighborAddresses[0] = -1;
+            neighborAddresses[1] = -1;
+            neighborAddresses[2] = -1;
+        }
+        // is the cell on the right edge?
+        if ((j+1) % width == 0) {
+            neighborAddresses[2] = -1;
+            neighborAddresses[4] = -1;
+            neighborAddresses[7] = -1;
+        }
+        // is the cell on the bottom edge?
+        if (j > size - width) {
+            neighborAddresses[5] = -1;
+            neighborAddresses[6] = -1;
+            neighborAddresses[7] = -1;
+        }
+
+        // check the valid neighbors:
+        for (int n = 0; n < 8; n++) {
+            if (neighborAddresses[n] == -1) continue;
+            neighbors += input[neighborAddresses[n]];
+        }
+
+        // now we can do the sim part
+        // is the cell alive?
+        if (cell == 1) {
+            if      (neighbors < 2) output[j] = 0;
+            else if (neighbors < 4) output[j] = 1;
+            else if (neighbors > 3) output[j] = 0;
+        } // cell's dead, is it easter?
+        else {
+            if (neighbors == 3) output[j] = 1;
+        }
+    }
+}
+
 
 int main() {
     // import grid from raw file
@@ -103,6 +160,30 @@ int main() {
     // now input contains the grid.
     
     cpuVersion(width, height, size, runtime, input, output);
+
+    // gpu
+    // allocate memory on the device (GPU)
+    uint8_t *d_input, *d_output;
+    // use the CHECK function on all cuda calls to actually get error output
+    CHECK(cudaMalloc((void **)&d_input, size));
+    CHECK(cudaMalloc((void **)&d_output, size));
+    
+    // copy image from host to device.
+    CHECK(cudaMemcpy(d_input, input, size, cudaMemcpyHostToDevice));
+
+    // define block and grid sizes
+    dim3 threadsPerBlock(16, 16);
+    dim3 numBlocks(width / threadsPerBlock.x, height / threadsPerBlock.y);
+    
+    // call kernel function
+    gpuGlobal<<<numBlocks, threadsPerBlock>>>(width, height, size, runtime, d_input, d_output);
+    CHECK(cudaGetLastError());
+
+    // cuda sync barrier
+    CHECK(cudaDeviceSynchronize());
+
+    // copy result from device to host
+    CHECK(cudaMemcpy(output, d_output, size, cudaMemcpyDeviceToHost));
 
     // save image to output file
     FILE *fptr_out;
