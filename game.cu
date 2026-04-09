@@ -185,6 +185,16 @@ int main() {
     fwrite(output, 1, size, fptr_out);
     fclose(fptr_out);
 
+    // re-import source file (forgetting to do this really messed me up)
+    fptr_in = fopen("gc_1024x1024-uint8.raw", "rb");
+    // helps with debugging
+    if (fptr_in == NULL) {
+        printf("Failed to open input file.\n");
+        return 1;
+    }
+    fread(input, 1, size, fptr_in);
+    fclose(fptr_in);
+
     // gpu
     // allocate memory on the device (GPU)
     uint8_t *d_input, *d_output;
@@ -203,13 +213,19 @@ int main() {
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     cudaEventRecord(start);
-    
-    // call kernel function
-    gpuGlobal<<<numBlocks, threadsPerBlock>>>(width, height, size, runtime, d_input, d_output);
-    CHECK(cudaGetLastError());
 
-    // cuda sync barrier
-    CHECK(cudaDeviceSynchronize());
+    // sim
+    for (int i = 0; i < runtime; i++) {
+        // call kernel function
+        gpuGlobal<<<numBlocks, threadsPerBlock>>>(width, height, size, runtime, d_input, d_output);
+        CHECK(cudaGetLastError());
+        CHECK(cudaDeviceSynchronize());
+        
+        // update one phase (clunky but idk how to do it better)
+        CHECK(cudaMemcpy(output, d_output, size, cudaMemcpyDeviceToHost));
+        CHECK(cudaMemcpy(d_input, output, size, cudaMemcpyHostToDevice));    
+    }
+
 
     // timer stops
     cudaEventRecord(stop);
