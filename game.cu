@@ -21,7 +21,7 @@
 
 // naive CPU implementation
 void cpuVersion(int width, int height, int size, int runtime, uint8_t *input, uint8_t *output) {
-    // now for the simulation:
+    // simulation:
     for (int i = 0; i < runtime; i++) {
         // for every cell:
         for (int j = 0; j < size; j++) {
@@ -77,6 +77,7 @@ void cpuVersion(int width, int height, int size, int runtime, uint8_t *input, ui
 }
 
 
+// global mem GPU implementation
 __global__ void gpuGlobal(int width, int height, int size, int runtime, uint8_t *input, uint8_t *output) {
     // get the col and row for the thread
     int Col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -136,13 +137,13 @@ __global__ void gpuGlobal(int width, int height, int size, int runtime, uint8_t 
 
 
 int main() {
-    // import grid from raw file
+    // sizing stuff
     const int width = 1024;
     const int height = 1024;
     const int size = width * height;
     const int runtime = 1000;
 
-    // this sizing may be incorrect
+    // size of a uint8 is 1 byte so that makes a lot of these args simpler
     uint8_t *input = (uint8_t *)malloc(size);
     uint8_t *output = (uint8_t *)malloc(size);
 
@@ -185,7 +186,7 @@ int main() {
     fwrite(output, 1, size, fptr_out);
     fclose(fptr_out);
 
-    // re-import source file (forgetting to do this really messed me up)
+    // re-import source file (do NOT forget lmao)
     fptr_in = fopen("gc_1024x1024-uint8.raw", "rb");
     // helps with debugging
     if (fptr_in == NULL) {
@@ -195,6 +196,7 @@ int main() {
     fread(input, 1, size, fptr_in);
     fclose(fptr_in);
 
+
     // gpu
     // allocate memory on the device (GPU)
     uint8_t *d_input, *d_output;
@@ -202,10 +204,10 @@ int main() {
     CHECK(cudaMalloc((void **)&d_input, size));
     CHECK(cudaMalloc((void **)&d_output, size));
     
-    // copy image from host to device.
+    // copy image from host to device
     CHECK(cudaMemcpy(d_input, input, size, cudaMemcpyHostToDevice));
 
-    // define block and grid sizes
+    // define block and grid sizes (16 was most efficient last time, so...)
     dim3 threadsPerBlock(16, 16);
     dim3 numBlocks(width / threadsPerBlock.x, height / threadsPerBlock.y);
 
@@ -218,10 +220,10 @@ int main() {
     for (int i = 0; i < runtime; i++) {
         // call kernel function
         gpuGlobal<<<numBlocks, threadsPerBlock>>>(width, height, size, runtime, d_input, d_output);
-        CHECK(cudaGetLastError());
-        CHECK(cudaDeviceSynchronize());
+        CHECK(cudaGetLastError()); // check for errors in kernel function call
+        CHECK(cudaDeviceSynchronize()); // sync
         
-        // update one phase (clunky but idk how to do it better)
+        // update one phase (clunky but works)
         CHECK(cudaMemcpy(output, d_output, size, cudaMemcpyDeviceToHost));
         CHECK(cudaMemcpy(d_input, output, size, cudaMemcpyHostToDevice));    
     }
@@ -248,6 +250,7 @@ int main() {
     fwrite(output, 1, size, fptr_out);
     fclose(fptr_out);
 
+    // sanity check
     printf("Program ran successfully.\n");
 
     return 0;
