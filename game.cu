@@ -140,7 +140,7 @@ int main() {
     const int width = 1024;
     const int height = 1024;
     const int size = width * height;
-    const int runtime = 100;
+    const int runtime = 1000;
 
     // this sizing may be incorrect
     uint8_t *input = (uint8_t *)malloc(size);
@@ -157,9 +157,33 @@ int main() {
     fread(input, 1, size, fptr_in);
     fclose(fptr_in);
 
-    // now input contains the grid.
-    
+    // timer starts
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
+
+    // cpu version
     cpuVersion(width, height, size, runtime, input, output);
+
+    // timer stops
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("Elapsed time for CPU implementation: %fms\n", milliseconds);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    // write results
+    FILE *fptr_out;
+    fptr_out = fopen("gc-cpu.raw", "wb");
+    if (fptr_out == NULL) {
+        printf("Failed to open output file.\n");
+        return 1;
+    }
+    fwrite(output, 1, size, fptr_out);
+    fclose(fptr_out);
 
     // gpu
     // allocate memory on the device (GPU)
@@ -174,6 +198,11 @@ int main() {
     // define block and grid sizes
     dim3 threadsPerBlock(16, 16);
     dim3 numBlocks(width / threadsPerBlock.x, height / threadsPerBlock.y);
+
+    // timer starts
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
     
     // call kernel function
     gpuGlobal<<<numBlocks, threadsPerBlock>>>(width, height, size, runtime, d_input, d_output);
@@ -182,12 +211,20 @@ int main() {
     // cuda sync barrier
     CHECK(cudaDeviceSynchronize());
 
+    // timer stops
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("Elapsed time for GPU implementation (global mem): %fms\n", milliseconds);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
     // copy result from device to host
     CHECK(cudaMemcpy(output, d_output, size, cudaMemcpyDeviceToHost));
 
     // save image to output file
-    FILE *fptr_out;
-    fptr_out = fopen("gc.raw", "wb");
+    fptr_out = fopen("gc-gpu.raw", "wb");
     if (fptr_out == NULL) {
         printf("Failed to open output file.\n");
         return 1;
@@ -195,7 +232,7 @@ int main() {
     fwrite(output, 1, size, fptr_out);
     fclose(fptr_out);
 
-    printf("all good");
+    printf("Program ran successfully.\n");
 
     return 0;
 }
