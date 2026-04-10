@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <cuda_runtime.h>
+#define TILE_WIDTH 16
 
 // helper for checking CUDA calls for errors
 // without this i am just floundering wondering what happened
@@ -78,7 +79,8 @@ void cpuVersion(int width, int height, int size, int runtime, uint8_t *input, ui
 
 
 // global mem GPU implementation
-__global__ void gpuGlobal(int width, int height, int size, int runtime, uint8_t *input, uint8_t *output) {
+__global__ 
+void gpuGlobal(int width, int height, int size, uint8_t *input, uint8_t *output) {
     // get the col and row for the thread
     int Col = blockIdx.x * blockDim.x + threadIdx.x;
     int Row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -135,6 +137,60 @@ __global__ void gpuGlobal(int width, int height, int size, int runtime, uint8_t 
     }
 }
 
+
+// shared mem GPU implementation (tiled)
+// each block has 16x16 (256) threads. we're dealing with a 1024x1024 image, so we need 4096 blocks.
+// 64 blocks by 64 blocks.
+__global__ 
+void gpuShared(int width, int height, int size, uint8_t *input, uint8_t *output) {
+    // declare shared mem arrays
+    __shared__ uint8_t inputData[TILE_WIDTH][TILE_WIDTH];
+    // halos share corners. 
+    __shared__ uint8_t haloTopBot[TILE_WIDTH+2][2] = {0}; // the top and bottom rows of the halo
+    __shared__ uint8_t haloLeftRight[2][TILE_WIDTH+2] = {0}; // the left and right columns of the halo
+
+    int bx = blockIdx.x;  int by = blockIdx.y;
+    int tx = threadIdx.x; int ty = threadIdx.y;
+    int blocks = width / TILE_WIDTH;
+
+    // get the col and row for the thread
+    int Col = bx * TILE_WIDTH + tx;
+    int Row = by * TILE_WIDTH + ty;
+    uint8_t Pvalue = 0;
+
+    // load data into shared mem
+    inputData[ty][tx] = input[Col + Row * width];
+    // load halo (janky)
+    // top row, bottom row, left col, right col, corners
+    // OOB halo coords can remain 0s, only in-bounds halo coords need to be checked
+    if (by != 0 && ty == 0)                 haloTopBot[tx+1][0] = input[Col + Row * width - width];
+    if (by != blocks - 1 && ty == width-1)  haloTopBot[tx+1][1] = input[Col + Row * width + width];
+    if (bx != 0 && tx == 0)                 haloLeftRight[0][ty+1] = input[Col + Row * width - 1];
+    if (bx != blocks - 1 && tx == width-1)  haloLeftRight[1][ty+1] = input[Col + Row * width + 1];
+    
+    // how these stupid memory loads work:
+    // check if it's a thread that is assigned to the corner
+    // if it is, 
+    if (ty == 1 && tx == 1 && by != 0 && bx != 0) {
+        // top left corner
+        haloTopBot[0][0] = input[Col + Row * width - tx - ty - width - 1];
+        haloLeftRight[0][0] = input[Col + Row * width - tx - ty - width - 1];
+    }
+    else if (ty == 1 && tx == 2 && by != blocks - 1 && bx != 0) {
+        // top right corner
+        haloTopBot[TILE_WIDTH+1][0] = input[Col + Row * width - tx - ty - width + TILE_WIDTH];
+        haloLeftRight[1][TILE_WIDTH+1] = input[Col + Row * width - tx - ty - width + TILE_WIDTH];
+    }
+    else if (ty == 1 && tx == 3 && by != blocks - 1 && bx != 0) {
+        // top right corner
+        haloTopBot[TILE_WIDTH+1][0] = input[Col + Row * width - tx - ty - width + TILE_WIDTH];
+        haloLeftRight[1][TILE_WIDTH+1] = input[Col + Row * width - tx - ty - width + TILE_WIDTH];
+    }
+
+    // sync
+    _syncthreads();
+
+}
 
 int main() {
     // sizing stuff
@@ -219,7 +275,7 @@ int main() {
     // sim
     for (int i = 0; i < runtime; i++) {
         // call kernel function
-        gpuGlobal<<<numBlocks, threadsPerBlock>>>(width, height, size, runtime, d_input, d_output);
+        gpuGlobal<<<numBlocks, threadsPerBlock>>>(width, height, size, d_input, d_output);
         CHECK(cudaGetLastError()); // check for errors in kernel function call
         CHECK(cudaDeviceSynchronize()); // sync
         
@@ -249,6 +305,30 @@ int main() {
     }
     fwrite(output, 1, size, fptr_out);
     fclose(fptr_out);
+
+
+    // shared memory implementation
+    // re-set-up
+    fptr_in = fopen("gc_1024x1024-uint8.raw", "rb");
+    if (fptr_in == NULL) {
+        printf("Failed to open input file.\n");
+        return 1;
+    }
+    fread(input, 1, size, fptr_in);
+    fclose(fptr_in);
+
+    // copy image from host to device
+    CHECK(cudaMemcpy(d_input, input, size, cudaMemcpyHostToDevice));
+
+
+    // define exec configs
+    dim3 dimGrid(ceil((1.0*width)/threadsPerBlock.x),
+                 ceil((1.0*width)/threadsPerBlock.y), 1);
+    dim3 dimBlock(threadsPerBlock.x, threadsPerBlock.y, 1);
+    gpuShared<<<dimGrid, dimBlock>>>(width, height, size, d_input, d_output);
+
+
+
 
     // sanity check
     printf("Program ran successfully.\n");
