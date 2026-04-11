@@ -143,53 +143,50 @@ void gpuGlobal(int width, int height, int size, uint8_t *input, uint8_t *output)
 // 64 blocks by 64 blocks.
 __global__ 
 void gpuShared(int width, int height, int size, uint8_t *input, uint8_t *output) {
-    // declare shared mem arrays
-    __shared__ uint8_t inputData[TILE_WIDTH][TILE_WIDTH];
-    // halos share corners. 
-    __shared__ uint8_t haloTopBot[TILE_WIDTH+2][2] = {0}; // the top and bottom rows of the halo
-    __shared__ uint8_t haloLeftRight[2][TILE_WIDTH+2] = {0}; // the left and right columns of the halo
+    // declare shared mem array. this covers the halo
+    __shared__ uint8_t inputData[TILE_WIDTH+2][TILE_WIDTH+2];
 
     int bx = blockIdx.x;  int by = blockIdx.y;
     int tx = threadIdx.x; int ty = threadIdx.y;
-    int blocks = width / TILE_WIDTH;
 
     // get the col and row for the thread
-    int Col = bx * TILE_WIDTH + tx;
-    int Row = by * TILE_WIDTH + ty;
-    uint8_t Pvalue = 0;
+    int Col = bx * TILE_WIDTH + tx - 1;
+    int Row = by * TILE_WIDTH + ty - width;
 
-    // load data into shared mem
-    inputData[ty][tx] = input[Col + Row * width];
-    // load halo (janky)
-    // top row, bottom row, left col, right col, corners
-    // OOB halo coords can remain 0s, only in-bounds halo coords need to be checked
-    if (by != 0 && ty == 0)                 haloTopBot[tx+1][0] = input[Col + Row * width - width];
-    if (by != blocks - 1 && ty == width-1)  haloTopBot[tx+1][1] = input[Col + Row * width + width];
-    if (bx != 0 && tx == 0)                 haloLeftRight[0][ty+1] = input[Col + Row * width - 1];
-    if (bx != blocks - 1 && tx == width-1)  haloLeftRight[1][ty+1] = input[Col + Row * width + 1];
+    // load data into shared mem (account for ghost elements)
+    if (Col < 0 || Col > width-1 || Row < 0 || Row > height-1) inputData[ty][tx] = 0;
+    else inputData[ty][tx] = input[Col + Row * width];
     
-    // how these stupid memory loads work:
-    // check if it's a thread that is assigned to the corner
-    // if it is, 
-    if (ty == 1 && tx == 1 && by != 0 && bx != 0) {
-        // top left corner
-        haloTopBot[0][0] = input[Col + Row * width - tx - ty - width - 1];
-        haloLeftRight[0][0] = input[Col + Row * width - tx - ty - width - 1];
-    }
-    else if (ty == 1 && tx == 2 && by != blocks - 1 && bx != 0) {
-        // top right corner
-        haloTopBot[TILE_WIDTH+1][0] = input[Col + Row * width - tx - ty - width + TILE_WIDTH];
-        haloLeftRight[1][TILE_WIDTH+1] = input[Col + Row * width - tx - ty - width + TILE_WIDTH];
-    }
-    else if (ty == 1 && tx == 3 && by != blocks - 1 && bx != 0) {
-        // top right corner
-        haloTopBot[TILE_WIDTH+1][0] = input[Col + Row * width - tx - ty - width + TILE_WIDTH];
-        haloLeftRight[1][TILE_WIDTH+1] = input[Col + Row * width - tx - ty - width + TILE_WIDTH];
-    }
-
     // sync
-    _syncthreads();
+    __syncthreads();
 
+    // reset row/col for easier calculations
+    Row = tx + 1;
+    Col = ty + 1;
+
+    // turn off some threads and . do the rest of it
+    if (ty < TILE_WIDTH && tx < TILE_WIDTH) {
+        int j = (by * TILE_WIDTH + ty) * width + bx * TILE_WIDTH + tx;
+        // count neighbors
+        uint8_t cell = inputData[Row][Col];
+        int neighbors = 0;
+
+        for (int i = -1; i < 2; i++) {
+            for (int j = -1; j < 2; j++) {
+                neighbors += inputData[Row + i][Col + j];
+            }
+        }
+
+        // is the cell alive?
+        if (cell == 1) {
+            if      (neighbors < 2) output[j] = 0;
+            else if (neighbors < 4) output[j] = 1;
+            else if (neighbors > 3) output[j] = 0;
+        } // cell's dead, is it easter?
+        else {
+            if (neighbors == 3) output[j] = 1;
+        }
+    }
 }
 
 int main() {
@@ -282,6 +279,10 @@ int main() {
         // update one phase (clunky but works)
         CHECK(cudaMemcpy(output, d_output, size, cudaMemcpyDeviceToHost));
         CHECK(cudaMemcpy(d_input, output, size, cudaMemcpyHostToDevice));    
+        // update one phase via pointer swap
+        uint8_t *temp = d_input;
+        d_input = d_output;
+        d_output = temp;
     }
 
 
@@ -296,6 +297,7 @@ int main() {
 
     // copy result from device to host
     CHECK(cudaMemcpy(output, d_output, size, cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(output, d_input, size, cudaMemcpyDeviceToHost));
 
     // save image to output file
     fptr_out = fopen("gc-gpu.raw", "wb");
@@ -319,16 +321,56 @@ int main() {
 
     // copy image from host to device
     CHECK(cudaMemcpy(d_input, input, size, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(d_output, input, size, cudaMemcpyHostToDevice)); // sanity check
 
-
+    // implementing strategy 2 (turn off threads when doing output)
     // define exec configs
-    dim3 dimGrid(ceil((1.0*width)/threadsPerBlock.x),
-                 ceil((1.0*width)/threadsPerBlock.y), 1);
-    dim3 dimBlock(threadsPerBlock.x, threadsPerBlock.y, 1);
-    gpuShared<<<dimGrid, dimBlock>>>(width, height, size, d_input, d_output);
+    dim3 dimGrid(ceil((1.0*width)/TILE_WIDTH),
+                 ceil((1.0*width)/TILE_WIDTH), 1);
+    dim3 dimBlock(TILE_WIDTH + 2, TILE_WIDTH + 2, 1);
 
+    // timer starts
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
 
+    // sim
+    for (int i = 0; i < runtime; i++) {
+        // call kernel function
+        gpuShared<<<dimGrid, dimBlock>>>(width, height, size, d_input, d_output);
+        CHECK(cudaGetLastError()); // check for errors in kernel function call
+        CHECK(cudaDeviceSynchronize()); // sync
+        
+        // update one phase (clunky but works)
+        CHECK(cudaMemcpy(output, d_output, size, cudaMemcpyDeviceToHost));
+        CHECK(cudaMemcpy(d_input, output, size, cudaMemcpyHostToDevice));    
+        // update one phase via pointer swap
+        uint8_t *temp = d_input;
+        d_input = d_output;
+        d_output = temp;
+    }
 
+    // timer stops
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("Elapsed time for GPU implementation (shared mem): %fms\n", milliseconds);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    // copy result from device to host
+    CHECK(cudaMemcpy(output, d_output, size, cudaMemcpyDeviceToHost));
+    CHECK(cudaMemcpy(output, d_input, size, cudaMemcpyDeviceToHost));
+
+    // save image to output file
+    fptr_out = fopen("gc-gpu-shared.raw", "wb");
+    if (fptr_out == NULL) {
+        printf("Failed to open output file.\n");
+        return 1;
+    }
+    fwrite(output, 1, size, fptr_out);
+    fclose(fptr_out);
 
     // sanity check
     printf("Program ran successfully.\n");

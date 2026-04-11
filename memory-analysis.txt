@@ -1,0 +1,27 @@
+Alright, having run the sim 1000 times, here's the times I got:
+Elapsed time for CPU implementation:              32823.218ms
+Elapsed time for GPU implementation (global mem):  1182.245ms
+Elapsed time for GPU implementation (shared mem):   655.130ms
+
+Clearly, using shared memory is better than accessing global memory repeatedly, 
+and both GPU implementations are vastly superior to the CPU runtime. 
+
+As for the bandwidth between GPU versions: we're working with a 1024x1024 grid, 
+so 1,048,576 total. In the global implementation, all of these need to be loaded 
+from global memory 9 times (itself and neighbors), but only the million pixels 
+of the image need to be written. In the shared implementation, the million 
+pixels only need to be loaded from global memory once, and are then accessed 
+from shared memory. Well, technically, the halo means that a few more pixels are 
+loaded from global memory. Approximately 68 per block (minus ghost pixels). With 
+16x16 blocks, 4,096 blocks are needed to cover the grid, so 279,528 extra pixels 
+are loaded from global memory, minus 4,100 ghost pixels. With all of that 
+established, here's the bandwidth (since each pixel is 1 byte):
+
+global: (9,437,184B + 1,048,576B) / 1.182s = 8,871,201 B/s, or .008GB/s.
+shared: (1,234,004B + 1,048,576B) / 0.655s = 3,622,259 B/s, or .004GB/s.
+
+It should be noted that there's technically a few more ghost pixels (since blocks 
+overlap), but that's a minor underestimate.
+
+I've also probably messed something up, since these are using the same GPU one 
+would expect the same bandwidth. Alas, it is 10pm.
